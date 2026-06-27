@@ -23,8 +23,7 @@
 #   my details
 #   my progress
 # ─────────────────────────────────────────────────────
-from dotenv import load_dotenv
-load_dotenv()
+
 from flask import Flask, request
 import requests as req
 import anthropic
@@ -33,23 +32,28 @@ from openpyxl.styles import Font, PatternFill, Alignment
 import os, json, base64
 from datetime import datetime
 
+# Load environment variables from .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed — use system env vars or defaults
+
 # ══════════════════════════════════════════════════════
 # CONFIG — update these values
 # ══════════════════════════════════════════════════════
-# ── CONFIG ──
 ULTRAMSG_INSTANCE = "instance182370"
 ULTRAMSG_TOKEN    = os.getenv("ULTRAMSG_TOKEN", "YOUR_ULTRAMSG_TOKEN_HERE")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
-OWN_NUMBER        = os.getenv("OWN_NUMBER", "917022206001")
-DESKTOP_PATH      = r"C:\Users\mckre\OneDrive\Desktop\FitTrack_Clients"
+DESKTOP_PATH      = os.getenv("DESKTOP_PATH", r"C:\Users\mckre\OneDrive\Desktop\FitTrack_Clients")
 
 # Your UltraMsg number — bot ignores messages from this number
-
+OWN_NUMBER = os.getenv("OWN_NUMBER", "YOUR_OWN_NUMBER_HERE")
 
 # Trainer phone numbers — only these can send trainer commands
 TRAINER_NUMBERS = [
-    "918123009006",   # your mobile
-    "917022206001",   # UltraMsg number
+    n.strip() for n in
+    os.getenv("TRAINER_NUMBERS", "918123009006,917022206001").split(",")
 ]
 
 # Derived URLs — no need to change
@@ -83,12 +87,7 @@ CLIENT_PAYMENT_STATUS  = "Paid by Client"
 ULTRAMSG_FILE_URL = "https://api.ultramsg.com/" + ULTRAMSG_INSTANCE + "/messages/document"
 MAPPING_FILE      = os.path.join(DESKTOP_PATH, "phone_mapping.json")
 
-# Excel column headers
-HEADERS = [
-    "Type", "Client ID", "Client Name", "Age", "Weight",
-    "Height", "Blood Group", "Diet Type", "Fitness Goal",
-    "Notes", "Date", "Updated By"
-]
+# Note: Excel columns are fully dynamic — see FIXED_COLS_START and FIXED_COLS_END
 
 # ══════════════════════════════════════════════════════
 # APP INIT
@@ -355,6 +354,46 @@ def parse_update(message):
     except:
         return {}
 
+def parse_bulk_history(message):
+    """Detect and extract bulk weight history from message.
+    Returns list of {weight, date/week} dicts if bulk history detected.
+    Returns None if not bulk history."""
+    raw = ask_claude(
+        "Analyse this fitness message and check if it contains MULTIPLE weight entries.\n\n"
+        "Message: " + message + "\n\n"
+        "Rules:\n"
+        "1. If message contains multiple weight values (more than 1) with week numbers or dates,\n"
+        "   extract each as a separate entry\n"
+        "2. Each entry should have: weight and week/date label\n"
+        "3. If only ONE weight value mentioned, return: null\n"
+        "4. If no weights at all, return: null\n\n"
+        "Reply ONLY with JSON array or null. No markdown. No backticks.\n"
+        "Example for: Week 1: 79kg, Week 2: 78kg, Week 3: 77.5kg\n"
+        "[\n"
+        "  {\"week\": \"Week 1\", \"weight\": \"79kg\"},\n"
+        "  {\"week\": \"Week 2\", \"weight\": \"78kg\"},\n"
+        "  {\"week\": \"Week 3\", \"weight\": \"77.5kg\"}\n"
+        "]\n\n"
+        "Example for: 79kg, 78kg, 77.5kg (no week labels):\n"
+        "[\n"
+        "  {\"week\": \"Week 1\", \"weight\": \"79kg\"},\n"
+        "  {\"week\": \"Week 2\", \"weight\": \"78kg\"},\n"
+        "  {\"week\": \"Week 3\", \"weight\": \"77.5kg\"}\n"
+        "]\n\n"
+        "For single weight like: update weight 79kg\n"
+        "Return: null"
+    )
+    raw = raw.strip()
+    if raw.lower() == 'null' or raw == '':
+        return None
+    try:
+        result = json.loads(raw)
+        if isinstance(result, list) and len(result) > 1:
+            return result
+        return None
+    except:
+        return None
+
 def parse_trainer_command(message):
     """Parse trainer command into action + parameters"""
     raw = ask_claude(
@@ -537,7 +576,8 @@ def add_row(filepath, updates, row_type, note="", updated_by="Client"):
     print(row_type + " row added dynamically")
 
 def build_progress_report(filepath, name, client_id):
-    """Build a weight progress report from Excel data"""
+    """Build a weight progress report from Excel data.
+    Uses dynamic column lookup instead of hardcoded indices."""
     wb   = openpyxl.load_workbook(filepath)
     ws   = wb.active
     rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r[2]]
@@ -545,8 +585,13 @@ def build_progress_report(filepath, name, client_id):
     if not rows:
         return "No data found in your profile."
 
-    sw = str(rows[0][4]);  sd = str(rows[0][10])
-    lw = str(rows[-1][4]); ld = str(rows[-1][10])
+    # Dynamic column index lookup
+    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column+1)]
+    weight_idx = next((i for i, h in enumerate(headers) if h and 'weight' in str(h).lower()), 4)
+    date_idx   = next((i for i, h in enumerate(headers) if h and h == 'Date'), 10)
+
+    sw = str(rows[0][weight_idx]);  sd = str(rows[0][date_idx])
+    lw = str(rows[-1][weight_idx]); ld = str(rows[-1][date_idx])
 
     try:
         s = float(''.join(c for c in sw if c.isdigit() or c=='.'))
@@ -563,7 +608,7 @@ def build_progress_report(filepath, name, client_id):
 
     history = "Start:   " + sw + " (" + sd + ")\n"
     for i, r in enumerate(rows[1:], 1):
-        history += "Week " + str(i) + ":   " + str(r[4]) + " (" + str(r[10]) + ") [" + str(r[0]) + "]\n"
+        history += "Week " + str(i) + ":   " + str(r[weight_idx]) + " (" + str(r[date_idx]) + ") [" + str(r[0]) + "]\n"
 
     return (
         "FitTrack Progress Report\n"
@@ -919,40 +964,79 @@ def client_update(body, sender):
         return
 
     send_text(sender, "Updating your profile " + cid + "... please wait!")
+
+    # ── Check for bulk weight history first ──
+    bulk = parse_bulk_history(body)
+    if bulk:
+        # Multiple weight entries detected — create one row per entry
+        send_text(sender,
+            "Bulk weight history detected!\n"
+            "Creating " + str(len(bulk)) + " rows — one per week...\n\n"
+            "Please wait!"
+        )
+        for entry in bulk:
+            week   = entry.get('week', '')
+            weight = entry.get('weight', '')
+            if weight:
+                note = week if week else ""
+                add_row(fp, {'weight': weight}, "Client Update",
+                        note=note, updated_by="Client")
+
+        now     = datetime.now().strftime("%d-%b-%Y %H:%M")
+        cap_now = datetime.now().strftime("%d %b %Y")
+        caption = "FitTrack Updated — " + name + " (" + cid + ") — " + cap_now
+
+        # Build summary
+        summary = "Weight history added:\n"
+        for entry in bulk:
+            summary += "• " + entry.get('week','') + ": " + entry.get('weight','') + "\n"
+
+        send_text(sender,
+            "Done! " + str(len(bulk)) + " weight entries saved!\n\n"
+            + summary + "\n"
+            + "Send 'my progress' to see your full journey!"
+        )
+        send_file(sender, fp, fn, caption)
+
+        # Notify trainer
+        send_to_trainer(
+            "Client bulk history received!\n\n"
+            + "Client: " + name + " (" + cid + ")\n"
+            + str(len(bulk)) + " weight entries added\n\n"
+            + summary,
+            fp, fn, "Bulk Update — " + caption
+        )
+        return
+
+    # ── Single update ──
     updates = parse_update(body)
     if not updates:
         send_text(sender,
             "Could not understand your message. Try:\n"
             "update weight 79kg\n"
             "update age 30\n"
-            "update goal muscle gain\n"
-            "update diet keto\n\n"
-            "Or just write anything — it will be saved as a comment!"
+            "update goal muscle gain\n\n"
+            "For bulk history send like:\n"
+            "Week 1: 79kg, Week 2: 78kg, Week 3: 77.5kg"
         )
         return
 
     # Separate known fields from comment
-    comment   = updates.pop('_comment', '')
-    known     = updates  # remaining known fields
+    comment = updates.pop('_comment', '')
+    known   = updates
 
-    # Add update row for known fields
     if known:
         add_row(fp, known, "Client Update", updated_by="Client")
-
-    # Add separate comment row if comment exists
     if comment:
         add_row(fp, {}, "Client Note", note=comment, updated_by="Client")
 
     now     = datetime.now().strftime("%d-%b-%Y %H:%M")
     cap_now = datetime.now().strftime("%d %b %Y")
     caption = "FitTrack Updated — " + name + " (" + cid + ") — " + cap_now
-
-    # Build reply lines
-    lines = [k.replace('_',' ').title() + ": " + v for k, v in known.items()]
+    lines   = [k.replace('_',' ').title() + ": " + v for k, v in known.items()]
     if comment:
         lines.append("Note saved: " + comment)
 
-    # Notify CLIENT
     send_text(sender,
         "Profile updated!\n"
         + "ID: " + cid + "\n\n"
@@ -962,7 +1046,6 @@ def client_update(body, sender):
     )
     send_file(sender, fp, fn, caption)
 
-    # Notify TRAINER
     send_to_trainer(
         "Client update received!\n\n"
         + "Client: " + name + " (" + cid + ")\n\n"
@@ -1053,13 +1136,19 @@ def read_all_clients_summary():
             summary += "\nClient: " + info["name"] + " (" + cid + ")\n"
             summary += "Registered: " + info.get("registered","N/A") + "\n"
             summary += "Total entries: " + str(len(rows)) + "\n"
-            summary += "Start weight: " + str(first[4]) + " on " + str(first[10]) + "\n"
-            summary += "Latest weight: " + str(latest[4]) + " on " + str(latest[10]) + "\n"
-            summary += "Age: " + str(latest[3]) + "\n"
-            summary += "Height: " + str(latest[5]) + "\n"
-            summary += "Blood group: " + str(latest[6]) + "\n"
-            summary += "Diet: " + str(latest[7]) + "\n"
-            summary += "Goal: " + str(latest[8]) + "\n"
+            # Dynamic column lookup
+            hdr = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column+1)]
+            def col(name): return next((i for i,h in enumerate(hdr) if h and name.lower() in str(h).lower()), None)
+            wi = col('weight'); di = col('date'); ai = col('age'); hi2 = col('height')
+            bgi = col('blood'); dti = col('diet'); gi = col('goal')
+
+            summary += "Start weight: " + (str(first[wi]) if wi is not None else "N/A") + " on " + (str(first[di]) if di is not None else "N/A") + "\n"
+            summary += "Latest weight: " + (str(latest[wi]) if wi is not None else "N/A") + " on " + (str(latest[di]) if di is not None else "N/A") + "\n"
+            summary += "Age: " + (str(latest[ai]) if ai is not None else "N/A") + "\n"
+            summary += "Height: " + (str(latest[hi2]) if hi2 is not None else "N/A") + "\n"
+            summary += "Blood group: " + (str(latest[bgi]) if bgi is not None else "N/A") + "\n"
+            summary += "Diet: " + (str(latest[dti]) if dti is not None else "N/A") + "\n"
+            summary += "Goal: " + (str(latest[gi]) if gi is not None else "N/A") + "\n"
             summary += "Phone: " + info.get("phone","N/A") + "\n"
 
         except Exception as e:
@@ -1522,7 +1611,7 @@ def check_all_payments():
 @app.route('/', methods=['GET'])
 def home():
     return """
-    <h2>FitTrack Bot v11 — Test Panel</h2>
+    <h2>FitTrack Bot v14 — Test Panel</h2>
     <p>Bot is running!</p>
     <hr>
     <h3>Test Query Engine</h3>
@@ -1597,7 +1686,7 @@ def list_clients():
 
 if __name__ == '__main__':
     print("="*50)
-    print("FitTrack Bot v11 — With Intelligent Query Engine")
+    print("FitTrack Bot v14 — Full Featured + OCR + Payments")
     print("Registration : Trainer ONLY")
     print("Updates      : Trainer + Client")
     print("ID Format    : RAH-001, PRI-001, RAH-002")
