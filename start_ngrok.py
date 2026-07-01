@@ -1,7 +1,11 @@
 import ngrok
 import time
+import os
+from dotenv import load_dotenv
 
-NGROK_TOKEN = "3FeuRXcZLXR9gkffkK5NzMa6Ktj_316aubTUiwND5aCUumnNv"    # paste your token here
+load_dotenv()
+
+NGROK_TOKEN = os.environ["NGROK_TOKEN"]    # set this in your .env file
 
 print("Starting ngrok tunnel...")
 listener = ngrok.forward(5000, authtoken=NGROK_TOKEN)
